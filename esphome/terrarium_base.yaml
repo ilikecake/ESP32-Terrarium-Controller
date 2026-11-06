@@ -1,0 +1,1497 @@
+globals:
+  - id: last_run_min
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  #This value is set to numbers >0 when override is active to indicate how many minutes remain in override state.
+  # This value is decremented by 1 every minute in the on_time function until it is back to zero.
+  - id: current_override_val
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: automatic_control_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  #- id: month_offset
+  #  type: int
+  #  restore_value: true
+  #  initial_value: "6"
+    
+time:
+  - platform: ds1307
+    # repeated synchronization is not necessary unless the external RTC
+    # is much more accurate than the internal clock
+    update_interval: never
+    
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Chicago
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+    on_time:
+      # Every 10 seconds
+      - seconds: /10
+        minutes: 0-59
+        then:
+            - if:
+                condition:
+                  #Check if override is active
+                  lambda: "return (id(current_override_val) > 0);"
+                then:
+                  # Override is active. Check if it is time to decrement the override timer.
+                  - lambda: |-
+                      auto time = id(sntp_time).now();
+                      //Run once per min
+                      if(id(last_run_min) != time.minute) {
+                        id(last_run_min) = time.minute;
+                        id(decrement_override_script).execute();
+                      }
+                else:
+                  # Override is not active
+                  - script.execute: update_outputs_script
+
+      - hours: 2,3,4,5
+        minutes: 5
+        seconds: 0
+        then:
+          - switch.turn_on: switch_antiburn
+      - hours: 2,3,4,5
+        minutes: 35
+        seconds: 0
+        then:
+          - switch.turn_off: switch_antiburn
+                
+                
+    on_time_sync:
+      then:
+        # Update the RTC when the synchronization was successful
+        ds1307.write_time:
+
+  - platform: template
+    id: offset_time
+    lambda: |-
+      auto current_time = id(sntp_time).now();
+      if( (current_time.month > 9) || (current_time.month == 9 && current_time.day_of_month >= 23) || (current_time.month < 3) || (current_time.month == 3 && current_time.day_of_month <= 20)) {
+        //Winter, offset time by 6 months.
+        return id(sntp_time).timestamp_now() + 6 * 30 * 86400;
+      }
+      //Summer, return the actual time.
+      return id(sntp_time).timestamp_now();
+
+number:
+  - platform: template
+    name: Screen Timeout
+    entity_category: "config"
+    device_class: "duration"
+    optimistic: true
+    id: display_timeout
+    unit_of_measurement: "s"
+    initial_value: 45
+    restore_value: true
+    min_value: 10
+    max_value: 180
+    step: 5
+    mode: box
+
+  - platform: template
+    name: Override Timeout
+    entity_category: "config"
+    device_class: "duration"
+    optimistic: true
+    id: override_value
+    unit_of_measurement: "min"
+    initial_value: 10
+    restore_value: true
+    min_value: 1
+    max_value: 180
+    step: 1
+    mode: box
+     
+datetime:
+  - platform: template
+    id: uvb_on_time
+    type: time
+    name: UVB On Time
+    optimistic: yes
+    initial_value: "11:00:00"
+    restore_value: true
+  - platform: template
+    id: uvb_off_time
+    type: time
+    name: UVB Off Time
+    optimistic: yes
+    initial_value: "14:00:00"
+    restore_value: true
+  - platform: template
+    id: heatlamp_on_time
+    type: time
+    name: Heat Lamp On Time
+    optimistic: yes
+    initial_value: "11:00:00"
+    restore_value: true
+  - platform: template
+    id: heatlamp_off_time
+    type: time
+    name: Heat Lamp Off Time
+    optimistic: yes
+    initial_value: "14:00:00"
+    restore_value: true
+    
+select:
+  - platform: lvgl
+    widget: lvgl_mode_dropdown
+    name: ModeLVGL
+    id: mode_select2
+    restore_value: true
+  
+  - platform: template
+    name: Mode
+    id: mode_select
+    options:
+     - "Auto"
+     - "Manual"
+     - "Summer"
+     - "Off"
+    initial_option: "Off"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lvgl.label.update:
+          id: lbl_mode_value
+          text:
+            format: "%s"
+            args: [ "x.c_str()" ]
+          text_decor: NONE 
+      - script.execute: clear_override_script
+      - script.wait: clear_override_script
+      - script.execute: update_outputs_script
+          
+      #- lambda: |-
+      #      //If the user manually sets the mode, turn off override if it is running.
+      #      //TODO: We don't actually change anything here, instead we turn off the override. Next time through the timer loop the outputs are reset to their correct states. Do I want to force an update here?
+      #      id(current_override_val) = 0;
+      #      ESP_LOGD("main", "Turn off override");
+
+sun:
+  id: sun_component
+  time_id: offset_time
+  latitude: 43°04′29″N
+  longitude: 89°23′03″W
+  
+one_wire:
+  - platform: gpio
+    pin: 39
+    id: one_wire_bus
+
+i2c:
+  sda: 3
+  scl: 4
+  scan: true
+  id: i2c_bus
+
+spi:
+  clk_pin: 36
+  mosi_pin: 35
+  miso_pin: 37
+  
+#IO Expander
+pca9554:
+  - id: "main_expander"
+    address: 0x20
+    #device: PCAL9555
+    pin_count: 16
+    setup_priority: 800.0
+    
+emc2101:
+  pwm:
+    resolution: 23
+
+fan:
+  - platform: speed
+    output: fan_duty_cycle
+    name: "Cooling Fan"
+
+output:
+  #Outputs on core MCU
+  - platform: gpio
+    id: "I2C_PWR_output"
+    pin: 5
+  - platform: gpio
+    pin: 7
+    id: internal_i2c_pwr
+  - platform: ledc
+    pin: 16
+    id: "lcd_backlight_output"
+  - platform: ledc
+    pin: 17
+    id: "buzzer_output"
+  - platform: gpio
+    pin: 21
+    id: neopixel_pwr
+  - platform: ledc
+    pin: 38
+    id: "led_hs_output"
+
+  #Outputs on IO expander
+  - platform: gpio
+    id: "relay3_output"
+    pin:
+      pca9554: main_expander
+      number: 13
+      mode:
+        output: true
+  - platform: gpio
+    id: "relay2_output"
+    pin:
+      pca9554: main_expander
+      number: 14
+      mode:
+        output: true
+  - platform: gpio
+    id: "relay1_output"
+    pin:
+      pca9554: main_expander
+      number: 15
+      mode:
+        output: true
+  - platform: gpio
+    id: "relay4_output"
+    pin:
+      pca9554: main_expander
+      number: 12
+      mode:
+        output: true
+  - platform: gpio
+    id: "OW_PWR_output"
+    pin:
+      pca9554: main_expander
+      number: 4
+      mode:
+        output: true
+
+  - platform: emc2101
+    id: fan_duty_cycle
+
+  - platform: template
+    id: LED_manual_brightness
+    type: float
+    write_action:
+      #- script.execute: set_override_script
+      - lambda: |-
+          //id(led_brightness_manual_global) = state;
+          ESP_LOGD("main", "Set global to %f", state);
+      #      id(led_light).turn_on().set_effect("None").perform();
+      #      id(led_light).turn_on().set_brightness(state).perform();
+
+switch:
+  - platform: output
+    name: "Internal I2C Power"
+    entity_category: "config"
+    output: internal_i2c_pwr
+    id: i2c_pwr_switch
+    restore_mode: ALWAYS_ON
+    
+  - platform: output
+    name: "External I2C Power"
+    entity_category: "config"
+    output: "I2C_PWR_output"
+    restore_mode: ALWAYS_ON
+
+  - platform: output
+    name: "One Wire Power"
+    entity_category: "config"
+    output: "OW_PWR_output"
+    restore_mode: ALWAYS_ON
+
+  - platform: output
+    #name: "Heat Panel"
+    output: ${heater_relay}
+    id: heater_internal_switch
+    internal: true
+    on_turn_on:
+      - switch.template.publish:
+          id: heater_template_switch
+          state: ON
+      - lvgl.label.update:
+          id: lbl_heater_status
+          text: "\uF00C"
+          text_color: green
+    on_turn_off:
+      - switch.template.publish:
+          id: heater_template_switch
+          state: OFF
+      - lvgl.label.update:
+          id: lbl_heater_status
+          text: "\uF00D"
+          text_color: red
+    on_state:
+      - lvgl.widget.update:
+          id: heater_lvgl_switch
+          state:
+            checked: !lambda return id(heater_internal_switch).state;
+            
+  - platform: template
+    name: "Heat Panel"
+    id: heater_template_switch
+    #Need this or the switch executes the script on startup and overrides the auto mode.
+    restore_mode: DISABLED
+    turn_on_action:
+      - switch.turn_on: heater_internal_switch
+      - script.execute: set_override_script
+    turn_off_action:
+      - switch.turn_off: heater_internal_switch
+      - script.execute: set_override_script 
+            
+  - platform: output
+    #name: "UVB Light"
+    output: ${UV_relay}
+    id: UV_internal_switch
+    internal: true
+    on_turn_on:
+      - switch.template.publish:
+          id: UV_template_switch
+          state: ON
+      - lvgl.label.update:
+          id: lbl_uv_status
+          text: "\uF00C"
+          text_color: green
+    on_turn_off:
+      - switch.template.publish:
+          id: UV_template_switch
+          state: OFF
+      - lvgl.label.update:
+          id: lbl_uv_status
+          text: "\uF00D"
+          text_color: red
+    on_state:
+      - lvgl.widget.update:
+          id: UV_lvgl_switch
+          state:
+            checked: !lambda return id(UV_internal_switch).state;
+
+  - platform: template
+    name: "UVB Light"
+    id: UV_template_switch
+    #Need this or the switch executes the script on startup and overrides the auto mode.
+    restore_mode: DISABLED
+    turn_on_action:
+      - switch.turn_on: UV_internal_switch
+      - script.execute: set_override_script
+    turn_off_action:
+      - switch.turn_off: UV_internal_switch
+      - script.execute: set_override_script       
+
+  - platform: output
+    #name: "Heat Lamp"
+    output: ${heat_lamp_relay}
+    id: heatlamp_internal_switch
+    internal: true
+    on_turn_on:
+      - switch.template.publish:
+          id: heatlamp_template_switch
+          state: ON
+      - lvgl.label.update:
+          id: lbl_lamp_status
+          text: "\uF00C"
+          text_color: green
+    on_turn_off:
+      - switch.template.publish:
+          id: heatlamp_template_switch
+          state: OFF
+      - lvgl.label.update:
+          id: lbl_lamp_status
+          text: "\uF00D"
+          text_color: red
+    on_state:
+      - lvgl.widget.update:
+          id: heat_lamp_lvgl_switch
+          state:
+            checked: !lambda return id(heatlamp_internal_switch).state;
+
+  - platform: template
+    name: "Heat Lamp"
+    id: heatlamp_template_switch
+    #Need this or the switch executes the script on startup and overrides the auto mode.
+    restore_mode: DISABLED
+    turn_on_action:
+      - switch.turn_on: heatlamp_internal_switch
+      - script.execute: set_override_script
+    turn_off_action:
+      - switch.turn_off: heatlamp_internal_switch
+      - script.execute: set_override_script
+
+  - platform: output
+    name: "Unused Relay"
+    output: ${unused_relay}
+    id: unused_switch
+
+  - platform: template
+    name: Antiburn
+    id: switch_antiburn
+    icon: mdi:television-shimmer
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - logger.log: "Starting Antiburn"
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+      - lvgl.pause:
+          show_snow: true
+    turn_off_action:
+      - logger.log: "Stopping Antiburn"
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+
+
+  - platform: template
+    name: Buzzer
+    id: switch_buzzer
+    optimistic: true
+    turn_on_action:
+      - rtttl.play: 'scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b'
+    turn_off_action:
+      - rtttl.play: 'star_wars:d=16,o=5,b=100:4e,4e,4e,8c,p,g,4e,8c,p,g,4e,4p,4b,4b,4b,8c6,p,g,4d#,8c,p,g,4e,8p'
+
+button:
+  - platform: template
+    name: "Test Button"
+    on_press:
+      - lambda: |-
+          std::vector<uint64_t> address_list;
+          address_list = id(one_wire_bus).get_devices();
+
+          ESP_LOGD("test", "Old address list:");
+          for (uint64_t addr: address_list) {
+            ESP_LOGD("test", "Address: 0x%llX", addr);
+          }
+          id(one_wire_bus).search();
+
+          ESP_LOGD("test", "New address list:");
+          for (uint64_t addr: address_list) {
+            ESP_LOGD("test", "Address: 0x%llX", addr);
+          }
+          
+        
+rtttl:
+  output: buzzer_output
+  id: rtttl_buzzer
+  gain: 60%
+        
+light:
+  - platform: esp32_rmt_led_strip
+    channel_colors: GRB
+    chipset: ws2812
+    pin: 18
+    num_leds: 1
+    name: "RGB LED"
+    
+#  - platform: esp32_rmt_led_strip
+#    channel_colors: GRB
+#    pin: 18
+#    num_leds: 1
+#    chipset: ws2812
+#    name: "External NeoPixel"
+
+  - platform: monochromatic
+    output: "lcd_backlight_output"
+    id: "lcd_backlight"
+    name: "LCD Backlight"
+    
+  - platform: monochromatic
+    output: "led_hs_output"
+    name: "LED Lights"
+    id: led_light
+    #internal: true
+    on_state:
+      - logger.log: "led light on state triggered"
+      - lvgl.slider.update:
+          id: led_lvgl_slider
+          value: !lambda return (int)(100.*id(led_light).remote_values.get_brightness());
+      - lvgl.label.update:
+          id: lbl_led_pwm_status
+          text:
+            format: "LED:  %3.0f%%"
+            args: [ "(100.*id(led_light).remote_values.get_brightness())" ]
+      - if:
+          condition:
+            lambda: return !(id(automatic_control_active));
+          then:
+            - logger.log: "Override activated"
+            - script.execute: set_override_script
+          
+    effects:
+      - lambda:
+          name: Daylight
+          update_interval: 10s
+          lambda: |-
+            float elevation = id(sun_elevation).state;
+            float current_brightness = id(led_light).remote_values.get_brightness();
+            if(elevation < -18) {
+              //Night
+              //if (id(led_ls).state) {id(led_ls).turn_off();}
+              if(fabs(current_brightness - .3) > .0001) {
+                id(automatic_control_active) = true;
+                id(led_light).turn_on().set_brightness(0).perform();
+                id(automatic_control_active) = false;
+              }
+            } else if (elevation < 10) {
+              //Fade in/out
+              //Fade in/out occurs linearly starting at -18 degrees (where twilight becomes night) 
+              // and ending at 10 degrees (chosen arbitrarially, about 1 hour after sunrise). This is 
+              // mapped to 30-100% dimming of the light. Dimming the light below 30% causes the light
+              // to flicker.
+              //if (!id(led_ls).state) {id(led_ls).turn_on();}
+              float new_brightness = 0.025*elevation + .75;
+              if(fabs(current_brightness - new_brightness) > .0001) {
+                id(automatic_control_active) = true;
+                id(led_light).turn_on().set_brightness(new_brightness).perform();
+                id(automatic_control_active) = false;
+              }
+            } else {
+              //Full light
+              //if (!id(led_ls).state) {id(led_ls).turn_on();}
+              if(fabs(current_brightness - 1.0) > .0001) {
+                id(automatic_control_active) = true;
+                id(led_light).turn_on().set_brightness(1.0).perform();
+                id(automatic_control_active) = false;
+              }
+            }
+
+binary_sensor:
+  #CPU
+  - platform: gpio
+    name: "I2C Power Fault"
+    pin: 
+      number: 6
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+
+  - platform: gpio
+    name: "I2C Bus Ready"
+    pin:
+      number: 9
+      inverted: false
+      mode:
+        input: true
+        pullup: true
+
+  #Expander
+  #- platform: gpio
+  #  name: "Right Door"
+  #  pin:
+  #    pca9554: main_expander
+  #    number: 0
+  #    inverted: false
+  #    mode:
+  #      input: true
+  #      pullup: true
+        
+  #- platform: gpio
+  #  name: "Left Door"
+  #  pin:
+  #    pca9554: main_expander
+  #    number: 1
+  #    inverted: false
+  #    mode:
+  #      input: true
+  #      pullup: true
+
+  - platform: gpio
+    name: "12V Power Detect"
+    pin:
+      pca9554: main_expander
+      number: 11
+      inverted: false
+      mode:
+        input: true
+    entity_category: diagnostic
+    device_class: power
+    
+  #- platform: gpio
+  #  name: "One Wire Power Fault"
+  #  pin:
+  #    pca9554: main_expander
+  #    number: 5
+  #    inverted: true
+  #    mode:
+  #      input: true
+  #      pullup: true
+  #  entity_category: diagnostic    
+  #  device_class: problem
+
+  #- platform: gpio
+  #  name: "5V Source"
+  #  pin:
+  #    pca9554: main_expander
+  #    number: 9
+  #    mode:
+  #      input: true
+  #      pullup: true
+  #  entity_category: diagnostic
+
+  #- platform: gpio
+  #  name: "3.3V Source"
+  #  pin:
+  #    pca9554: main_expander
+  #    number: 10
+  #    mode:
+  #      input: true
+  #      pullup: true
+  #  entity_category: diagnostic
+    
+sensor:
+  - platform: emc2101
+    internal_temperature:
+      id: emc_temperature
+      name: "EMC2101 Temperature Sensor"
+    speed:
+      id: speed_sensor
+      name: "Fan Speed"
+    duty_cycle:
+      id: duty_cycle_sensor
+      name: "Fan Duty Cycle"
+    update_interval: 5s
+  
+  - platform: sht4x
+    temperature:
+      name: "Ceiling Temperature"
+      id: sht_temp
+    humidity:
+      name: "Humidity"
+      id: sht_humidity
+      on_value:
+        - lvgl.label.update:
+            id: lbl_status_humidity
+            text:
+              format: "%.1f%%"
+              args: ["x"]
+      
+  - platform: dallas_temp
+    address: ${internal_temp_sensor_address}
+    #address: 0x2500000c801c2628
+    name: "Onboard"
+    id: ds18b20_temp
+    update_interval: 10s
+    
+  - platform: dallas_temp
+    address: ${warm_side_temp_sensor_address}
+    name: "Warm Side Temperature"
+    id: "temp_warm_side"
+    update_interval: 10s
+    on_value:
+      - lvgl.label.update:
+          id: lbl_status_temp_warm
+          text:
+            format: "%.1f°F"
+            args: ["x*9/5+32"]
+
+  - platform: dallas_temp
+    address: ${cool_side_temp_sensor_address}
+    name: "Cool Side Temperature"
+    id: "temp_cool_side"
+    update_interval: 10s
+    on_value:
+        - lvgl.label.update:
+            id: lbl_status_temp_cool
+            text:
+              format: "%.1f°F"
+              args: ["x*9/5+32"]
+  
+  - platform: sun
+    id: sun_elevation
+    name: Sun Elevation
+    type: elevation
+    state_class: "measurement"
+  - platform: sun
+    id: sun_azmuth
+    name: Sun Azimuth
+    type: azimuth
+    state_class: "measurement"
+
+  - platform: template
+    name: "Override timer"
+    lambda: |-
+      return id(current_override_val);
+    update_interval: 10s
+    icon: "mdi:timer-outline"
+    device_class: duration
+    unit_of_measurement: min
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: uptime
+    type: seconds
+    name: Uptime Sensor
+    entity_category: diagnostic
+    unit_of_measurement: sec
+    icon: "mdi:timelapse"
+    device_class: duration
+    accuracy_decimals: 0
+
+  - platform: uptime
+    type: timestamp
+    name: Last Boot
+    entity_category: diagnostic
+    icon: "mdi:calendar"
+
+  - platform: debug
+    free:
+      name: Heap Free
+      entity_category: diagnostic
+    block:
+      name: "Heap Max Block"
+      entity_category: diagnostic
+    min_free:
+      name: "Heap Min Free"
+      entity_category: diagnostic
+    fragmentation:
+      name: "Heap Fragmentation"
+      entity_category: diagnostic
+    loop_time:
+      name: "Loop Time"
+      entity_category: diagnostic
+    psram:
+      name: "Free PSRAM"
+      entity_category: diagnostic
+    cpu_frequency:
+      name: "CPU Frequency"
+      entity_category: diagnostic
+
+  - platform: max17043
+    id: max17043_id
+    battery_voltage:
+      name: "Battery Voltage"
+    battery_level:
+      name: "Battery"
+      
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+      entity_category: diagnostic
+    reset_reason:
+      name: "Reset Reason"
+      entity_category: diagnostic
+
+#climate:
+#  - platform: thermostat
+#    name: "Thermostat Climate Controller"
+#    id: heater_thermostat
+#    sensor: temp_cool_side
+#    min_heating_off_time: 30s
+#    min_heating_run_time: 30s
+#    min_idle_time: 30s
+#    heat_action:
+#      - switch.turn_on: heater_internal_switch
+#    idle_action:
+#      - switch.turn_off: heater_internal_switch
+#    default_preset: Home
+#    preset:
+#      - name: Home
+#        default_target_temperature_low: 22 °C
+
+#TODO: If the device is not supposed to be in auto mode when the timer expires, it should not switch back to auto mode.
+#TODO: Can I update the label to say how much time is left in override?
+script:
+  #- id: timer_override_script
+  #  mode: restart
+  #  then:
+  #    - select.set:
+  #        id: mode_select
+  #        option: "Manual"
+  #    - logger.log: "Auto mode paused"
+  #    - delay: ${override_delay}
+  #    - logger.log: "Auto mode resumed"
+  #    - select.set:
+  #        id: mode_select
+  #        option: "Auto"
+          
+  - id: set_override_script
+    mode: single
+    then:
+      - logger.log: "Override set"
+      - globals.set: 
+          id: current_override_val
+          value: !lambda |-
+            return id(override_value).state;
+      - lvgl.label.update:
+          id: lbl_mode_value
+          text_decor: STRIKETHROUGH
+      - lvgl.button.update:
+          id: lvgl_clear_override_button
+          text: "Override active"
+          state: 
+            disabled: false
+      - lambda: |-
+          auto time = id(sntp_time).now();
+          id(last_run_min) = time.minute;
+
+  - id: clear_override_script
+    mode: single
+    then:
+      - logger.log: "Override cleared"
+      - globals.set: 
+          id: current_override_val
+          value: "0"
+      - lvgl.label.update:
+          id: lbl_mode_value
+          text_decor: NONE
+      - lvgl.button.update:
+          id: lvgl_clear_override_button
+          text: "Override Off"
+          state: 
+            disabled: true
+            
+  - id: decrement_override_script
+    mode: single
+    then:
+      - logger.log: "Override decrement"
+      - lambda: |-
+          id(current_override_val) -= 1;
+          if(id(current_override_val) == 0) {
+            //Clear override
+            id(clear_override_script).execute();
+          }
+            
+  - id: update_outputs_script
+    mode: single
+    then:
+      - lambda: |-
+          auto time = id(sntp_time).now();
+          //Device state is not overridden, set up the device based on the current mode.
+          if (id(mode_select).current_option() == "Auto") {
+            //Auto mode:
+            // - Set UV light and heat lamp based on current time
+            // - Set LED light to 'daylight' effect
+            // - Turn on thermostat (TODO: variable temp for thermostat?)
+            ESP_LOGD("Update Script", "Mode: Auto");
+            uint16_t uvb_on_min = (id(uvb_on_time).hour*60) + id(uvb_on_time).minute;
+            uint16_t uvb_off_min = (id(uvb_off_time).hour*60) + id(uvb_off_time).minute;
+            uint16_t heatlamp_on_min = (id(heatlamp_on_time).hour*60) + id(heatlamp_on_time).minute;
+            uint16_t heatlamp_off_min = (id(heatlamp_off_time).hour*60) + id(heatlamp_off_time).minute;
+            uint16_t now_min = (time.hour*60) + time.minute;
+
+            //UV lamp
+            if( (now_min >= uvb_on_min) && (now_min < uvb_off_min) ) {
+              if (!id(UV_internal_switch).state) {id(UV_internal_switch).turn_on();}
+            } else {
+              if (id(UV_internal_switch).state) {id(UV_internal_switch).turn_off();}
+            }
+
+            //Heat lamp
+            if( (now_min >= heatlamp_on_min) && (now_min < heatlamp_off_min) ) {
+              if (!id(heatlamp_internal_switch).state) {id(heatlamp_internal_switch).turn_on();}
+            } else {
+              if (id(heatlamp_internal_switch).state) {id(heatlamp_internal_switch).turn_off();}
+            }
+
+            //LED Lights
+            if(id(led_light).get_effect_name() != "Daylight") {
+              id(automatic_control_active) = true;
+              id(led_light).turn_on().set_effect("Daylight").perform();
+              id(automatic_control_active) = false;
+            }
+
+            //Thermostat
+            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_HEAT).perform();
+          } else if (id(mode_select).current_option() == "Summer") {
+            //Summer mode:
+            // - Turn off UV light and heat lamp
+            // - Set LED light to 'daylight' effect
+            // - Turn off thermostat
+            ESP_LOGD("Update Script", "Mode: Summer");
+
+            id(UV_internal_switch).turn_off();
+            id(heatlamp_internal_switch).turn_off();
+                      
+            //LED Lights
+            if(id(led_light).get_effect_name() != "Daylight")
+            {
+              ESP_LOGD("Update Script", "Set LED mode");
+              id(automatic_control_active) = true;
+              id(led_light).turn_on().set_effect("Daylight").perform();
+              id(automatic_control_active) = false;
+            }
+  
+            //Thermostat
+            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();
+          } else if (id(mode_select).current_option() == "Off") {
+            //Off mode:
+            // - Turn off UV light and heat lamp
+            // - Turn off LED light
+            // - Turn off thermostat
+            ESP_LOGD("Update Script", "Mode: Off");
+
+            id(UV_internal_switch).turn_off();
+            id(heatlamp_internal_switch).turn_off();
+            id(automatic_control_active) = true;
+            id(led_light).turn_off().perform();
+            id(automatic_control_active) = false;
+                      
+            //Thermostat
+            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();  
+          } else {
+            //Manual mode:
+            // - Do nothing
+            ESP_LOGD("Update Script", "Mode: Manual");
+          }
+
+display:
+  - platform: mipi_spi
+    id: TFT_display
+    model: ILI9341
+    dc_pin: A3
+    reset_pin: A4
+    cs_pin: 12
+    #dimensions:
+    #  - height: 320
+    #  - width: 240
+    rotation: 0
+    auto_clear_enabled: false
+    update_interval: never
+
+touchscreen:
+  - platform: ft63x6
+    display: "TFT_display"
+    id: touchscreen_id
+    transform:
+      mirror_x: true
+      mirror_y: true
+    on_release:
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - logger.log: "LVGL resuming"
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+            - light.turn_on: 
+                id: lcd_backlight
+                brightness: 60%
+
+lvgl:
+  displays: TFT_display
+  touchscreens: touchscreen_id
+  rotation: 0
+  buffer_size: 100%
+  refresh_interval: 50ms
+  
+  pages:
+    - id: main_page
+      widgets:
+        - obj:
+            align: TOP_MID
+            styles: header_footer
+            widgets:
+              - label:
+                  text: "Terrarium Status"
+                  align: CENTER
+                  text_align: CENTER
+                  text_color: 0xFFFFFF
+      
+        - label:
+            text: "Mode: "
+            align: BOTTOM_LEFT
+            id: lbl_mode_label
+            y: -33
+            x: 70
+            text_font: montserrat_14
+
+        - label:
+            text: "Auto"
+            id: lbl_mode_value
+            align_to:
+              id: lbl_mode_label
+              align: OUT_RIGHT_MID
+            #align: BOTTOM_RIGHT
+            #y: -33
+            #x: -75
+            #y: -33
+            text_font: montserrat_14
+
+        - label:
+            text: ${turtle_name}
+            align: TOP_LEFT
+            x: 10
+            y: 40
+
+        - label:
+            text: "\U0000e425"
+            align: TOP_RIGHT
+            x: -10
+            y: 40
+            text_font: icons_20
+
+        - obj:
+            align: TOP_MID
+            y: 65
+            width: 228
+            height: 100
+            pad_all: 10
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(20), FR(20), FR(20)]
+              grid_columns: [FR(10), FR(40), FR(40), FR(10)]
+            widgets:
+              - label:
+                  text: "Warm Side:"
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_temp_warm
+                  text_align: RIGHT
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+              - label:
+                  text: "Cool Side:"
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_temp_cool
+                  text_align: RIGHT
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+              - label:
+                  text: "Humidity:"
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_humidity
+                  text_align: RIGHT
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+        - obj:
+            align: TOP_LEFT
+            y: 170
+            x: 6
+            width: 112
+            height: 100
+            pad_all: 10
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(20), FR(20), FR(20)]
+              grid_columns: [FR(80), FR(20)]
+            widgets:
+              - label:
+                  text: "LED:  100%"
+                  id: lbl_led_pwm_status
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 0
+                  grid_cell_column_span: 2
+              - label:
+                  text: "Lamp:"
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 0
+              - label:
+                  text: "\uF00D"
+                  id: lbl_lamp_status
+                  text_color: 0xFF0000
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 1
+              - label:
+                  text: "UV:"
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 0
+              - label:
+                  text: "\uF00D"
+                  id: lbl_uv_status
+                  text_color: 0xFF0000
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 1
+
+        - obj:
+            align: TOP_RIGHT
+            y: 170
+            x: -6
+            width: 112
+            height: 100
+            pad_all: 10
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(20), FR(20), FR(20)]
+              grid_columns: [FR(80), FR(20)]
+            widgets:
+              - label:
+                  text: "Heater:"
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 0
+              - label:
+                  text: "\uF00C"
+                  id: lbl_heater_status
+                  text_color: 0x00FF00
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 1
+              - label:
+                  text: "LED:"
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 0
+              - label:
+                  text: "\uF00D"
+                  text_color: 0xFF0000
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 1
+
+    - id: manual_control_page
+      widgets:
+        - obj:
+            align: TOP_MID
+            styles: header_footer
+            widgets:
+              - label:
+                  text: "Manual Control"
+                  align: CENTER
+                  text_align: CENTER
+                  text_color: 0xFFFFFF
+        - obj:
+            align: CENTER
+            width: 228
+            height: 250
+            pad_all: 10
+            scrollable: false
+            #scrollbar_mode: "OFF"
+            #scroll_dir: "NONE"
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(20), FR(20), FR(20), FR(20), FR(20), FR(20)]
+              grid_columns: [FR(10), FR(40), FR(40), FR(10)]
+              grid_cell_x_align: START
+              grid_cell_y_align: CENTER
+            widgets:
+              - label:
+                  text: "LED:"
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 1
+              - slider:
+                  id: led_lvgl_slider
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 2
+                  width: 90
+                  min_value: 0
+                  max_value: 100
+                  on_release:
+                    - lambda: |-
+                        //id(led_light).turn_off().set_effect("None").perform();
+                        id(led_light).turn_on().set_effect("None").set_brightness(lv_slider_get_value(led_lvgl_slider)/100.).perform();
+                        //id(current_override_val) = id(override_value).state;
+                        id(set_override_script).execute();
+              - label:
+                  text: "Lamp:"
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 1
+                  grid_cell_x_align: START
+                  grid_cell_y_align: CENTER
+              - switch:
+                  align: CENTER
+                  id: heat_lamp_lvgl_switch
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: START
+                  grid_cell_y_align: CENTER
+                  on_click:
+                    switch.toggle: heatlamp_template_switch
+              - label:
+                  text: "UV:"
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 1
+                  #align: LEFT_MID
+              - switch:
+                  #align: CENTER
+                  id: UV_lvgl_switch
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 2
+                  on_click:
+                    switch.toggle: UV_template_switch
+              - label:
+                  text: "Heater:"
+                  grid_cell_row_pos: 3
+                  grid_cell_column_pos: 1
+                  #align: LEFT_MID
+              - switch:
+                  #align: CENTER
+                  id: heater_lvgl_switch
+                  grid_cell_row_pos: 3
+                  grid_cell_column_pos: 2
+                  #height: 20
+                  on_click:
+                    switch.toggle: heater_template_switch
+              #- label:
+              #    text: "Mode:"
+              #    grid_cell_row_pos: 4
+              #    grid_cell_column_pos: 1
+              #    align: LEFT_MID
+              - dropdown:
+                  id: lvgl_mode_dropdown
+                  #align: CENTER
+                  grid_cell_row_pos: 4
+                  grid_cell_column_pos: 1
+                  grid_cell_column_span: 2
+                  grid_cell_x_align: CENTER
+                  options:
+                   - "Auto"
+                   - "Manual"
+                   - "Summer"
+                   - "Off"
+                  selected_index: 2
+              - button:
+                  id: lvgl_clear_override_button
+                  grid_cell_row_pos: 5
+                  grid_cell_column_pos: 1
+                  grid_cell_column_span: 2
+                  grid_cell_x_align: CENTER
+                  text: "Override Off"
+                  on_click:
+                    - logger.log: "Override cleared"
+                    - script.execute: clear_override_script
+                    - script.wait: clear_override_script
+                    - script.execute: update_outputs_script
+
+    - id: terrarium_setup_page
+      widgets:
+        - obj:
+            align: TOP_MID
+            styles: header_footer
+            widgets:
+              - label:
+                  text: "Terrarium Setup"
+                  align: CENTER
+                  text_align: CENTER
+                  text_color: 0xFFFFFF
+        - obj:
+            align: CENTER
+            width: 228
+            height: 250
+            pad_all: 10
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(20), FR(20), FR(20), FR(20), FR(20)]
+              grid_columns: [FR(10), FR(40), FR(40), FR(10)]
+            widgets:
+              - label:
+                  text: "asdf"
+                  text_align: CENTER
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 1
+                  grid_cell_x_align: CENTER
+                  grid_cell_y_align: START
+
+              - label:
+                  text: "Unknown"
+                  text_align: CENTER
+                  grid_cell_row_pos: 0
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: CENTER
+
+              - label:
+                  text: "Warm Side:"
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_temp_warm1
+                  text_align: RIGHT
+                  grid_cell_row_pos: 1
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+              - label:
+                  text: "Cold Side:"
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_temp_cool1
+                  text_align: RIGHT
+                  grid_cell_row_pos: 2
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+              - label:
+                  text: "Humidity:"
+                  grid_cell_row_pos: 3
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_status_humidity1
+                  text_align: RIGHT
+                  grid_cell_row_pos: 3
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+              - label:
+                  text: "Now:"
+                  grid_cell_row_pos: 4
+                  grid_cell_column_pos: 1
+
+              - label:
+                  text: "--.- °C"
+                  id: lbl_weather_outdnoor_now
+                  text_align: RIGHT
+                  grid_cell_row_pos: 4
+                  grid_cell_column_pos: 2
+                  grid_cell_x_align: STRETCH
+
+  theme:
+    label:
+      text_font: montserrat_16 # set all your labels to use your custom defined font
+    button:
+      bg_color: 0x2F8CD8
+      bg_grad_color: 0x005782
+      bg_grad_dir: VER
+      bg_opa: COVER
+      border_color: 0x0077b3
+      border_width: 1
+      text_color: 0xFFFFFF
+      pressed: # set some button colors to be different in pressed state
+        bg_color: 0x006699
+        bg_grad_color: 0x00334d
+      checked: # set some button colors to be different in checked state
+        bg_color: 0x1d5f96
+        bg_grad_color: 0x03324A
+        text_color: 0xfff300
+    buttonmatrix:
+      bg_opa: TRANSP
+      border_color: 0x0077b3
+      border_width: 0
+      text_color: 0xFFFFFF
+      pad_all: 0
+      items: # set all your buttonmatrix buttons to use your custom defined styles and font
+        bg_color: 0x2F8CD8
+        bg_grad_color: 0x005782
+        bg_grad_dir: VER
+        bg_opa: COVER
+        border_color: 0x0077b3
+        border_width: 1
+        text_color: 0xFFFFFF
+        text_font: montserrat_16
+        pressed:
+          bg_color: 0x006699
+          bg_grad_color: 0x00334d
+        checked:
+          bg_color: 0x1d5f96
+          bg_grad_color: 0x03324A
+          text_color: 0x005580
+    switch:
+      bg_color: 0xC0C0C0
+      bg_grad_color: 0xb0b0b0
+      bg_grad_dir: VER
+      bg_opa: COVER
+      checked:
+        bg_color: 0x1d5f96
+        bg_grad_color: 0x03324A
+        bg_grad_dir: VER
+        bg_opa: COVER
+      knob:
+        bg_color: 0xFFFFFF
+        bg_grad_color: 0xC0C0C0
+        bg_grad_dir: VER
+        bg_opa: COVER
+    slider:
+      border_width: 1
+      border_opa: 15%
+      bg_color: 0xcccaca
+      bg_opa: 15%
+      indicator:
+        bg_color: 0x1d5f96
+        bg_grad_color: 0x03324A
+        bg_grad_dir: VER
+        bg_opa: COVER
+      knob:
+        bg_color: 0x2F8CD8
+        bg_grad_color: 0x005782
+        bg_grad_dir: VER
+        bg_opa: COVER
+        border_color: 0x0077b3
+        border_width: 1
+        text_color: 0xFFFFFF
+  
+  style_definitions:
+    - id: header_footer
+      bg_color: 0x2F8CD8
+      bg_grad_color: 0x005782
+      bg_grad_dir: VER
+      bg_opa: COVER
+      border_opa: TRANSP
+      radius: 0
+      pad_all: 0
+      pad_row: 0
+      pad_column: 0
+      border_color: 0x0077b3
+      text_color: 0xFFFFFF
+      width: 100%
+      height: 30
+
+  top_layer:
+    widgets:
+      - buttonmatrix:
+          align: bottom_mid
+          styles: header_footer
+          pad_all: 0
+          outline_width: 0
+          id: top_layer
+          items:
+            styles: header_footer
+          rows:
+            - buttons:
+                - id: page_prev
+                  text: "\uF053"
+                  on_press:
+                    then:
+                      lvgl.page.previous:
+                - id: page_home
+                  text: "\uF015"
+                  on_press:
+                    then:
+                      lvgl.page.show: main_page
+                - id: page_next
+                  text: "\uF054"
+                  on_press:
+                    then:
+                      lvgl.page.next:
+
+  on_idle:
+    timeout: !lambda "return (id(display_timeout).state * 1000);"
+    then:
+      - logger.log: "LVGL is idle"
+      - light.turn_off: lcd_backlight
+      - lvgl.page.show: main_page
+      - lvgl.pause:
+                 
+font:
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: icons_20
+    size: 20
+    glyphs: ["\U0000e425"]
