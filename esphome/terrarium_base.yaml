@@ -787,22 +787,22 @@ text_sensor:
       name: "Reset Reason"
       entity_category: diagnostic
 
-#climate:
-#  - platform: thermostat
-#    name: "Thermostat Climate Controller"
-#    id: heater_thermostat
-#    sensor: temp_cool_side
-#    min_heating_off_time: 30s
-#    min_heating_run_time: 30s
-#    min_idle_time: 30s
-#    heat_action:
-#      - switch.turn_on: heater_internal_switch
-#    idle_action:
-#      - switch.turn_off: heater_internal_switch
-#    default_preset: Home
-#    preset:
-#      - name: Home
-#        default_target_temperature_low: 22 °C
+climate:
+  - platform: thermostat
+    name: "Thermostat Climate Controller"
+    id: heater_thermostat
+    sensor: temp_warm_side
+    min_heating_off_time: 30s
+    min_heating_run_time: 30s
+    min_idle_time: 30s
+    heat_action:
+      - switch.turn_on: heater_internal_switch
+    idle_action:
+      - switch.turn_off: heater_internal_switch
+    default_preset: Home
+    preset:
+      - name: Home
+        default_target_temperature_low: 22 °C
 
 #TODO: If the device is not supposed to be in auto mode when the timer expires, it should not switch back to auto mode.
 #TODO: Can I update the label to say how much time is left in override?
@@ -907,7 +907,7 @@ script:
             }
 
             //Thermostat
-            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_HEAT).perform();
+            id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_HEAT).perform();
           } else if (id(mode_select).current_option() == "Summer") {
             //Summer mode:
             // - Turn off UV light and heat lamp
@@ -928,7 +928,7 @@ script:
             }
   
             //Thermostat
-            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();
+            id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();
           } else if (id(mode_select).current_option() == "Off") {
             //Off mode:
             // - Turn off UV light and heat lamp
@@ -943,7 +943,7 @@ script:
             id(automatic_control_active) = false;
                       
             //Thermostat
-            //id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();  
+            id(heater_thermostat).make_call().set_mode(CLIMATE_MODE_OFF).perform();  
           } else {
             //Manual mode:
             // - Do nothing
