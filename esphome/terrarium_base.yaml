@@ -466,7 +466,7 @@ switch:
 
 button:
   - platform: template
-    name: "Test Button"
+    name: "Rescan 1-wire Bus"
     on_press:
       - lambda: |-
           std::vector<uint64_t> address_list;
