@@ -802,7 +802,7 @@ climate:
     default_preset: Home
     preset:
       - name: Home
-        default_target_temperature_low: 22 °C
+        default_target_temperature_low: 72 °F
 
 #TODO: If the device is not supposed to be in auto mode when the timer expires, it should not switch back to auto mode.
 #TODO: Can I update the label to say how much time is left in override?
