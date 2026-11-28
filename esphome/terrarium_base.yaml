@@ -779,6 +779,16 @@ sensor:
       name: "Battery"
       
 text_sensor:
+  - platform: template
+    device_class: date
+    name: "Simulated Date"
+    lambda: |-
+      char time_string[13];
+      auto the_time = id(offset_time).now();
+      the_time.strftime(time_string, 12, "%Y-%m-%d");
+      return {time_string};
+    update_interval: 60s
+
   - platform: debug
     device:
       name: "Device Info"
